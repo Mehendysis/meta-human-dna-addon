@@ -1,0 +1,15 @@
+[
+  {"name":"jaw","parent":6,"tx":0.0,"ty":0.49,"tz":0.01,"rx":0.0,"ry":0.0,"rz":0.0,"rw":1.0},
+  {"name":"eye_l","parent":6,"tx":-0.03,"ty":0.50,"tz":0.06,"tx_debug":0,"rx":0.0,"ry":0.0,"rz":0.0,"rw":1.0},
+  {"name":"eye_r","parent":6,"tx":0.03,"ty":0.50,"tz":0.06,"rx":0.0,"ry":0.0,"rz":0.0,"rw":1.0},
+  {"name":"brow_l_inner","parent":6,"tx":-0.015,"ty":0.53,"tz":0.045,"rx":0.0,"ry":0.0,"rz":0.0,"rw":1.0},
+  {"name":"brow_r_inner","parent":6,"tx":0.015,"ty":0.53,"tz":0.045,"rx":0.0,"ry":0.0,"rz":0.0,"rw":1.0},
+  {"name":"brow_l_mid","parent":6,"tx":-0.035,"ty":0.535,"tz":0.04,"rx":0.0,"ry":0.0,"rz":0.0,"rw":1.0},
+  {"name":"brow_r_mid","parent":6,"tx":0.035,"ty":0.535,"tz":0.04,"rx":0.0,"ry":0.0,"rz":0.0,"rw":1.0},
+  {"name":"brow_l_outer","parent":6,"tx":-0.055,"ty":0.53,"tz":0.035,"rx":0.0,"ry":0.0,"rz":0.0,"rw":1.0},
+  {"name":"brow_r_outer","parent":6,"tx":0.055,"ty":0.53,"tz":0.035,"rx":0.0,"ry":0.0,"rz":0.0,"rw":1.0},
+  {"name":"eye_l_lid_upper","parent":6,"tx":-0.03,"ty":0.505,"tz":0.061,"rx":0.0,"ry":0.0,"rz":0.0,"rw":1.0},
+  {"name":"eye_r_lid_upper","parent":6,"tx":0.03,"ty":0.505,"tz":0.061,"rx":0.0,"ry":0.0,"rz":0.0,"rw":1.0},
+  {"name":"eye_l_lid_lower","parent":6,"tx":-0.03,"ty":0.495,"tz":0.061,"rx":0.0,"ry":0.0,"rz":0.0,"rw":1.0},
+  {"name":"eye_r_lid_lower","parent":6,"tx":0.03,"ty":0.495,"tz":0.061,"rx":0.0,"ry":0.0,"rz":0.0,"rw":1.0}
+]

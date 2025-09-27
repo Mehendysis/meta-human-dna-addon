@@ -330,19 +330,287 @@ class DNAImporter:
         mesh.uv_layers.active = uv_layer
 
     def set_mesh_uvs(self, mesh_index: int, bmesh_object: bmesh.types.BMesh):
-        u_values = self._dna_reader.getVertexTextureCoordinateUs(mesh_index)
-        v_values = self._dna_reader.getVertexTextureCoordinateVs(mesh_index)
-        uv_indices = self._dna_reader.getVertexLayoutTextureCoordinateIndices(mesh_index)
-        uv_layer = bmesh_object.loops.layers.uv.active
+        # Harden, verify & instrument UV assignment to avoid native crashes and enable isolation.
+        import os, traceback, json, sys
+        # One-time module provenance print (helps confirm which riglogic build is active inside Blender)
+        if os.environ.get('DNA_TO_FBX_UV_TRACE') and not getattr(self, '_printed_riglogic_module_once', False):
+            try:
+                rl_mod = sys.modules.get('riglogic')  # type: ignore
+                if rl_mod:
+                    print(f"[UVTRACE] riglogic_module_file={getattr(rl_mod,'__file__','<none>')}")
+            except Exception:
+                pass
+            self._printed_riglogic_module_once = True
+        verify = bool(os.environ.get('DNA_TO_FBX_UV_VERIFY'))
+        disable_assign = bool(os.environ.get('DNA_TO_FBX_UV_DISABLE_ASSIGN'))
+        harden = bool(os.environ.get('DNA_TO_FBX_UV_HARDEN'))
+        verify_dump = os.environ.get('DNA_TO_FBX_UV_VERIFY_DUMP')
+        trace = bool(os.environ.get('DNA_TO_FBX_UV_TRACE'))
+        fetch_limit_env = os.environ.get('DNA_TO_FBX_UV_FETCH_LIMIT')  # 0=none,1=U,2=U+V,3=U+V+indices
+        try:
+            fetch_limit = int(fetch_limit_env) if fetch_limit_env is not None else 3
+        except Exception:
+            fetch_limit = 3
+        external_json = os.environ.get('DNA_TO_FBX_UV_EXTERNAL_JSON')
+        external_uvs = None
+        if external_json and os.path.exists(external_json):
+            try:
+                if not hasattr(self, '_external_uv_cache'):
+                    import json as _json
+                    with open(external_json, 'r', encoding='utf-8') as fh:
+                        raw = _json.load(fh)
+                    # Index by int for fast lookup
+                    meshes = raw.get('meshes', [])
+                    self._external_uv_cache = {m.get('mesh_index'): m for m in meshes}
+                external_uvs = getattr(self, '_external_uv_cache', {}).get(mesh_index)
+            except Exception as ext_e:
+                logger.debug(f"set_mesh_uvs(external_uv_load_fail) file={external_json} err={ext_e}")
+        def _t(msg: str):
+            if trace:
+                try:
+                    print(f"[UVTRACE] {msg}", flush=True)
+                except Exception:
+                    pass
+        _t(f"enter set_mesh_uvs mesh={mesh_index} fetch_limit={fetch_limit} disable_assign={disable_assign}")
+        # Optional single-mesh probe filtering. If probe index set and does not match, skip early.
+        probe_filter = os.environ.get('DNA_TO_FBX_UV_PROBE_INDEX')
+        if probe_filter is not None and probe_filter.isdigit():
+            pf = int(probe_filter)
+            if pf != mesh_index:
+                _t(f"skip_due_to_probe_filter target={pf}")
+                return
+        try:
+            mesh_count = self._dna_reader.getMeshCount()
+            _t(f"dna_mesh_count={mesh_count}")
+        except Exception as e:
+            _t(f"dna_mesh_count_error={e}")
 
+        # Optional preflight using safer sampling accessors exposed in new riglogic bindings.
+        # If DNA_TO_FBX_UV_SAFE_PROBE is set, attempt small sampled retrieval via
+        # tryGetVertexTextureCoordinateUs / Vs before executing the full fetch path. If the
+        # accessors are missing (older bindings) we silently continue.
+        safe_probe = bool(os.environ.get('DNA_TO_FBX_UV_SAFE_PROBE'))
+        if safe_probe and not external_uvs:
+            try:
+                rl_mod = sys.modules.get('riglogic')  # type: ignore
+                reader = self._dna_reader
+                # Support both reader methods and module-level free functions.
+                get_u = None
+                get_v = None
+                if hasattr(reader, 'tryGetVertexTextureCoordinateUs') and hasattr(reader, 'tryGetVertexTextureCoordinateVs'):
+                    get_u = lambda m, n: reader.tryGetVertexTextureCoordinateUs(m, n)
+                    get_v = lambda m, n: reader.tryGetVertexTextureCoordinateVs(m, n)
+                elif rl_mod and hasattr(rl_mod, 'tryGetVertexTextureCoordinateUs') and hasattr(rl_mod, 'tryGetVertexTextureCoordinateVs'):
+                    get_u = lambda m, n: rl_mod.tryGetVertexTextureCoordinateUs(reader, m, n)  # type: ignore
+                    get_v = lambda m, n: rl_mod.tryGetVertexTextureCoordinateVs(reader, m, n)  # type: ignore
+                if get_u and get_v:
+                    _t('safe_probe_begin')
+                    probe_u = get_u(mesh_index, 8)
+                    probe_v = get_v(mesh_index, 8)
+                    _t(f"safe_probe_u ok={probe_u.get('ok', False)} size={probe_u.get('size')} sample_head={probe_u.get('sample', [])[:4]}")
+                    _t(f"safe_probe_v ok={probe_v.get('ok', False)} size={probe_v.get('size')} sample_head={probe_v.get('sample', [])[:4]}")
+                    if (not probe_u.get('ok')) or (not probe_v.get('ok')):
+                        logger.error(f"set_mesh_uvs(safe_probe_fail) mesh_index={mesh_index} reason_u={probe_u.get('reason')} reason_v={probe_v.get('reason')}")
+                        return
+                    _t('safe_probe_end')
+                else:
+                    _t('safe_probe_skipped_missing_try_accessors')
+            except Exception as sp_exc:
+                logger.error(f"set_mesh_uvs(safe_probe_exception) mesh_index={mesh_index} err={sp_exc}")
+                return
+
+        # Source UVs either from external JSON or native reader.
+        if external_uvs:
+            _t("using_external_uvs")
+            u_values = external_uvs.get('u', [])
+            v_values = external_uvs.get('v', [])
+            uv_indices = external_uvs.get('indices', [])
+        else:
+            # Stepwise fetching to isolate crash origin.
+            try:
+                if fetch_limit >= 1:
+                    _t("fetch_u_start")
+                    u_values = self._dna_reader.getVertexTextureCoordinateUs(mesh_index)
+                    _t(f"fetch_u_done len={len(u_values)}")
+                else:
+                    u_values = []
+                if fetch_limit >= 2:
+                    _t("fetch_v_start")
+                    v_values = self._dna_reader.getVertexTextureCoordinateVs(mesh_index)
+                    _t(f"fetch_v_done len={len(v_values)}")
+                else:
+                    v_values = []
+                if fetch_limit >= 3:
+                    _t("fetch_indices_start")
+                    uv_indices = self._dna_reader.getVertexLayoutTextureCoordinateIndices(mesh_index)
+                    _t(f"fetch_indices_done len={len(uv_indices)}")
+                else:
+                    uv_indices = []
+            except Exception as e:
+                logger.error(f"set_mesh_uvs(prelude_fetch) mesh_index={mesh_index} error={e}")
+                _t(f"fetch_exception {e}")
+                return
+        # Attach raw counts to a shared list for later export diagnostics
+        try:
+            self._collected_uv_fetch = getattr(self, '_collected_uv_fetch', [])
+            self._collected_uv_fetch.append({
+                'mesh_index': mesh_index,
+                'u_count': len(u_values),
+                'v_count': len(v_values),
+                'indices_count': len(uv_indices),
+                'fetch_limit': fetch_limit,
+                'assigned_planned': not disable_assign,
+            })
+        except Exception:
+            pass
+
+        stats = {
+            'mesh_index': mesh_index,
+            'u_count': len(u_values),
+            'v_count': len(v_values),
+            'uv_indices': len(uv_indices),
+            'face_count': len(bmesh_object.faces),
+            'mismatch_faces': 0,
+            'bad_lookups': 0,
+            'truncated': False,
+            'assigned': not disable_assign,
+        }
+
+        # Optional early exit for fetch-only diagnostics
+        if os.environ.get('DNA_TO_FBX_UV_FETCH_ONLY'):
+            stats['assigned'] = False
+            self._uv_verify_stats = getattr(self, '_uv_verify_stats', [])
+            self._uv_verify_stats.append(stats)
+            logger.debug(f"set_mesh_uvs(fetch_only) mesh_index={mesh_index} stats={stats}")
+            return
+
+        # Verification pass
+        verify_errors = []
+        if verify:
+            try:
+                for face in bmesh_object.faces:
+                    face_vert_indices = [v.index for v in face.verts]
+                    dna_face_vert_indices = self._dna_reader.getFaceVertexLayoutIndices(mesh_index, face.index)
+                    if len(face_vert_indices) != len(dna_face_vert_indices):
+                        stats['mismatch_faces'] += 1
+                        if harden:
+                            continue
+                    # map & spot-check indices bounds
+                    for dna_i in dna_face_vert_indices:
+                        if dna_i >= len(uv_indices):
+                            stats['bad_lookups'] += 1
+                            if harden:
+                                break
+                if verify_dump:
+                    sample = {
+                        'first_uv_indices': uv_indices[:50],
+                        'u_first_20': list(u_values[:20]),
+                        'v_first_20': list(v_values[:20]),
+                        'mismatch_faces': stats['mismatch_faces'],
+                        'bad_lookups': stats['bad_lookups']
+                    }
+                    try:
+                        with open(verify_dump, 'a', encoding='utf-8') as fh:
+                            fh.write(json.dumps({'mesh_index': mesh_index, 'sample': sample}) + '\n')
+                    except Exception:
+                        pass
+            except Exception as ve:
+                verify_errors.append(str(ve))
+        if verify and verify_errors:
+            stats['verify_errors'] = verify_errors
+        # If verification found structural issues and harden on, optionally skip assignment.
+        if verify and harden and (stats['mismatch_faces'] or stats['bad_lookups'] or verify_errors):
+            disable_assign = True
+            stats['assigned'] = False
+            stats['skipped_reason'] = 'verify_fail'
+
+        # Limit faces for binary search isolation
+        max_faces_env = os.environ.get('DNA_TO_FBX_UV_MAX_FACES')
+        try:
+            max_faces = int(max_faces_env) if max_faces_env and max_faces_env.isdigit() else None
+        except Exception:
+            max_faces = None
+
+        if disable_assign:
+            # Skip any interaction with bmesh UV layers to avoid native crashes while probing.
+            self._uv_verify_stats = getattr(self, '_uv_verify_stats', [])
+            self._uv_verify_stats.append(stats)
+            logger.debug(f"set_mesh_uvs(skip_assign_early) mesh_index={mesh_index} stats={stats}")
+            _t("skip_assign_early_return")
+            return
+
+        # At this point we intend to write UVs, so resolve (or create) the BMesh UV layer defensively.
+        try:
+            uv_layer = bmesh_object.loops.layers.uv.active
+        except Exception as e:
+            logger.debug(f"set_mesh_uvs(uv_active_fail) mesh_index={mesh_index} err={e}")
+            _t(f"uv_active_fail {e}")
+            uv_layer = None
+        if uv_layer is None:
+            try:
+                # Attempt lookup by the expected name first
+                uv_layer = bmesh_object.loops.layers.uv.get(UV_MAP_NAME)  # type: ignore[attr-defined]
+            except Exception:
+                uv_layer = None
+        if uv_layer is None:
+            try:
+                uv_layer = bmesh_object.loops.layers.uv.new(UV_MAP_NAME)
+                logger.debug(f"set_mesh_uvs(created_uv_layer) mesh_index={mesh_index}")
+                _t("created_uv_layer")
+            except Exception as e:
+                logger.error(f"set_mesh_uvs(failed_create_uv_layer) mesh_index={mesh_index} err={e}")
+                _t(f"failed_create_uv_layer {e}")
+                # Persist stats and abort safely
+                self._uv_verify_stats = getattr(self, '_uv_verify_stats', [])
+                self._uv_verify_stats.append(stats)
+                return
+
+        face_counter = 0
         for face in bmesh_object.faces:
-            face_vert_indices = [v.index for v in face.verts]
-            dna_face_vert_indices = self._dna_reader.getFaceVertexLayoutIndices(mesh_index, face.index)
-            lookup = dict(zip(face_vert_indices, dna_face_vert_indices))
-            for loop in face.loops:
-                uv_index = uv_indices[lookup[loop.vert.index]]
-                loop[uv_layer].uv.x = u_values[uv_index]
-                loop[uv_layer].uv.y = v_values[uv_index]
+            if max_faces is not None and face_counter >= max_faces:
+                stats['truncated'] = True
+                break
+            face_counter += 1
+            try:
+                face_vert_indices = [v.index for v in face.verts]
+                dna_face_vert_indices = self._dna_reader.getFaceVertexLayoutIndices(mesh_index, face.index)
+                if len(face_vert_indices) != len(dna_face_vert_indices):
+                    stats['mismatch_faces'] += 1
+                    if harden:
+                        continue
+                lookup = dict(zip(face_vert_indices, dna_face_vert_indices))
+                for loop in face.loops:
+                    try:
+                        dna_layout_i = lookup.get(loop.vert.index)
+                        if dna_layout_i is None or dna_layout_i >= len(uv_indices):
+                            stats['bad_lookups'] += 1
+                            if harden:
+                                continue
+                            dna_layout_i = 0
+                        uv_index = uv_indices[dna_layout_i]
+                        if uv_index >= len(u_values) or uv_index >= len(v_values):
+                            stats['bad_lookups'] += 1
+                            if harden:
+                                continue
+                            uv_index = 0
+                        loop[uv_layer].uv.x = u_values[uv_index]
+                        loop[uv_layer].uv.y = v_values[uv_index]
+                    except Exception as loop_exc:
+                        if harden:
+                            logger.debug(f"set_mesh_uvs(loop_skip) mesh={mesh_index} face={face.index} loop_err={loop_exc}")
+                            continue
+                        else:
+                            raise
+            except Exception as face_exc:
+                if harden:
+                    logger.debug(f"set_mesh_uvs(face_skip) mesh={mesh_index} face={face.index} err={face_exc}")
+                    continue
+                else:
+                    logger.error(f"set_mesh_uvs(face_error) mesh={mesh_index} face={face.index} err={face_exc}\n{traceback.format_exc(limit=1)}")
+                    raise
+        # Persist stats list for diagnostics collection
+        self._uv_verify_stats = getattr(self, '_uv_verify_stats', [])
+        self._uv_verify_stats.append(stats)
         
     def set_vertex_colors(self, mesh_index: int, bmesh_object: bmesh.types.BMesh):
         vertex_color_indices, vertex_color_values = self.get_dna_vertex_colors(mesh_index)

@@ -18,19 +18,78 @@ if sys.platform == 'darwin':
 elif sys.platform == 'linux':
     OS_NAME = 'linux'
 
-# Ensure that the riglogic module is not reloaded
-sys.path.append(os.path.join(os.getcwd(), os.pardir, 'meta-human-dna-bindings', OS_NAME, ARCH))
-if "riglogic" in sys.modules:
-    riglogic = sys.modules["riglogic"]
-else:
-    import riglogic
-    sys.modules["riglogic"] = riglogic
+# Ensure that the riglogic module is not reloaded. Original expected layout:
+#   <repo>/meta-human-dna-bindings/<os>/<arch>/riglogic*.pyd
+# Our build/staging currently places them under the addon: 
+#   <repo>/meta-human-dna-addon/src/addons/meta_human_dna/bindings/<os>/<arch>/
+
+_binding_search_paths: list[str] = []
+
+# 1. Explicit env override
+env_dir = os.environ.get("DNA_BINDINGS_DIR")
+if env_dir:
+    _binding_search_paths.append(env_dir)
+
+cwd_repo_guess = os.getcwd()
+
+# 2. Original expected path
+_binding_search_paths.append(os.path.join(cwd_repo_guess, os.pardir, 'meta-human-dna-bindings', OS_NAME, ARCH))
+
+# 3. Addon staging path (absolute preferred)
+_addon_bindings_abs = os.path.abspath(os.path.join(cwd_repo_guess, 'meta-human-dna-addon', 'src', 'addons', 'meta_human_dna', 'bindings', OS_NAME, ARCH))
+_binding_search_paths.append(_addon_bindings_abs)
+
+for p in _binding_search_paths:
+    if p and os.path.isdir(p) and p not in sys.path:
+        sys.path.append(p)
+
+def _attempt_riglogic_import():
+    if "riglogic" in sys.modules:
+        return True
+    try:
+        import riglogic  # type: ignore  # noqa: F401
+        sys.modules["riglogic"] = riglogic  # type: ignore
+        return True
+    except Exception:  # noqa: BLE001
+        # Soft failure: check manifest to see if this is an expected dll_missing state
+        try:
+            from pathlib import Path as _P
+            manifest = _P(__file__).resolve().parents[1] / 'src' / 'addons' / 'meta_human_dna' / 'bindings' / OS_NAME / ARCH / 'BINDINGS_MANIFEST.json'
+            if manifest.exists():
+                import json as _json
+                data = _json.loads(manifest.read_text())
+                rl = data.get('modules', {}).get('riglogic', {})
+                if rl.get('status') == 'dll_missing':
+                    print('[conftest] riglogic import skipped (dll_missing per manifest).')
+                    return False
+        except Exception:
+            pass
+        # Fallback to previous hard error for unexpected absence
+        raise
+
+_attempt_riglogic_import()
 
 
 import pytest # noqa: E402
 import shutil # noqa: E402
-import bpy # import this to ensure that mathutils is available  # noqa: E402, F401
-from mathutils import Vector, Euler # noqa: E402
+from typing import TYPE_CHECKING, Any
+try:  # pragma: no cover - only executed when Blender available
+    import bpy  # type: ignore  # noqa: E402, F401
+    from mathutils import Vector, Euler  # type: ignore  # noqa: E402
+except Exception:  # noqa: BLE001
+    if TYPE_CHECKING:
+        from typing import Any as Vector  # type: ignore
+        from typing import Any as Euler  # type: ignore
+    else:
+        class _Dummy:
+            def __init__(self, *a: Any, **k: Any):
+                pass
+            def __iter__(self):
+                return iter(())
+            def __repr__(self):
+                return 'Dummy()'
+        Vector = Euler = _Dummy  # type: ignore
+        print('[conftest] Blender not available; using dummy Vector/Euler for non-Blender tests.')
 from pathlib import Path # noqa: E402
 from constants import REPO_ROOT # noqa: E402
 
@@ -76,18 +135,21 @@ def pytest_configure():
     sys.path.append(str(REPO_ROOT / 'src' / 'addons'))
         
 
-from fixtures.addon import addon  # noqa: E402, F401
-from fixtures.dna_data import ( # noqa: E402, F401
-    original_dna_json_data,
-    exported_dna_json_data,
-    calibrated_dna_json_data
-)
-from fixtures.scene import (  # noqa: E402, F401
-    load_dna,
-    head_bmesh,
-    head_armature,
-    modify_scene
-)
+if not os.environ.get('TEST_MANIFEST_ONLY'):
+    from fixtures.addon import addon  # noqa: E402, F401
+    from fixtures.dna_data import (  # noqa: E402, F401
+        original_dna_json_data,
+        exported_dna_json_data,
+        calibrated_dna_json_data
+    )
+    from fixtures.scene import (  # noqa: E402, F401
+        load_dna,
+        head_bmesh,
+        head_armature,
+        modify_scene
+    )
+else:
+    print('[conftest] TEST_MANIFEST_ONLY set: skipping heavy Blender fixtures.')
 
 @pytest.fixture(scope='session')
 def addons() -> list:

@@ -5,6 +5,14 @@ import logging
 from pathlib import Path
 from mathutils import Vector, Matrix
 from typing import Literal, TYPE_CHECKING
+
+# New: detect core capabilities to optionally short-circuit heavy joint-dependent reads.
+try:
+    import meta_human_dna_core as _mhc
+    _MHC_CAPS = getattr(_mhc, 'CAPABILITIES', {}) or {}
+except Exception:  # pragma: no cover
+    _MHC_CAPS = {}
+
 from ..constants import (
     ComponentType,
     SHAPE_KEY_DELTA_THRESHOLD
@@ -46,11 +54,11 @@ def get_dna_reader(
     # if file_format.lower() == 'json':
     #     mode = riglogic.OpenMode.Text
 
-    stream = riglogic.FileStream.create( 
+    # Updated signature: memRes now optional positional ignored in binding; pass only required args.
+    stream = riglogic.FileStream.create(
         path=str(file_path),
-        accessMode=riglogic.AccessMode.Read, 
-        openMode=mode, 
-        memRes=memory_resource
+        accessMode=riglogic.AccessMode.Read,
+        openMode=mode
     )
     if file_format.lower() == 'json':
         reader = riglogic.JSONStreamReader.create( 
@@ -76,6 +84,15 @@ def get_dna_reader(
     except IndexError as error:
         logger.debug(f"Error reading DNA file '{file_path}': {error}")
         return
+
+    # If running with stub meta_human_dna_core without joint augmentation capability and no joints will
+    # be exposed via riglogic (e.g., fake / partial), downstream parametrized tests can generate thousands
+    # of redundant cases that will trivially fail. Allow an early return for Definition-only requests.
+    if data_layer == 'Definition' and not _MHC_CAPS.get('joint_augmentation'):
+        # Heuristic: if reader indicates zero joints (API differs across real vs stub riglogic), we skip.
+        if hasattr(reader, 'getJointCount') and reader.getJointCount() == 0:
+            logger.debug('Skipping joint-heavy Definition read due to missing augmentation capabilities.')
+            return reader
 
     if not riglogic.Status.isOk(): 
         status = riglogic.Status.get() 

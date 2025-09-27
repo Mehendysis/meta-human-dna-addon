@@ -1,8 +1,83 @@
 import os
 import sys
+import logging
+from pathlib import Path
+
 import bpy
 import bpy.utils.previews
-import logging
+
+def _register_unreal_dll_directories():
+    """Best‑effort registration of directories that may contain required Unreal / RigLogic DLLs.
+
+    This improves reliability of importing native extension modules (e.g. riglogic, meta_human_dna_core)
+    in headless test environments and standard Blender sessions on Windows, where transitive DLL
+    dependencies are not automatically resolved unless they live beside the .pyd or are on PATH.
+
+    Strategy:
+      1. Honor user / CI provided environment variables (first so they can override).
+      2. Walk parent directories looking for a 'build' folder (project root heuristic) and register
+         known derivative subpaths that commonly contain the DLLs after staging.
+      3. Fallback: if os.add_dll_directory is unavailable (pre Python 3.8), mutate PATH.
+    """
+    if os.name != 'nt':  # Only needed on Windows.
+        return
+
+    added = []
+    candidates = []
+
+    # 1. Environment provided hints.
+    for env_key in ("UNREAL_ENGINE_DIR", "UE_ROOT", "UNREAL_ROOT"):  # allow a few common spellings
+        val = os.environ.get(env_key)
+        if val:
+            candidates.append(Path(val) / "Engine" / "Binaries" / "Win64")
+            candidates.append(Path(val) / "Binaries" / "Win64")
+
+    # 2. Project relative heuristics (search upwards for a directory containing 'build').
+    try:
+        here = Path(__file__).resolve()
+        project_root = None
+        for parent in here.parents:
+            if (parent / "build").is_dir():
+                project_root = parent
+                break
+        if project_root:
+            build_dir = project_root / "build"
+            riglogic_plugin_dir = build_dir / "plugin_packages" / "RigLogic_Win64"
+            unreal_binaries = project_root / "UnrealEngine" / "Engine" / "Binaries" / "Win64"
+            candidates.extend([riglogic_plugin_dir, build_dir, unreal_binaries])
+    except Exception as e:  # pragma: no cover - defensive, should not happen
+        logging.getLogger(__name__).debug("Failed to derive project root for DLL registration: %s", e)
+
+    # 3. De-duplicate while preserving order.
+    seen = set()
+    ordered_candidates = []
+    for c in candidates:
+        try:
+            c_resolved = c.resolve()
+        except Exception:
+            c_resolved = c
+        if c_resolved not in seen:
+            seen.add(c_resolved)
+            ordered_candidates.append(c_resolved)
+
+    log = logging.getLogger(__name__)
+    for path in ordered_candidates:
+        if not path.exists() or not path.is_dir():
+            continue
+        try:
+            if hasattr(os, 'add_dll_directory'):
+                os.add_dll_directory(str(path))  # Python 3.8+
+                added.append(str(path))
+            else:  # Fallback: extend PATH (less safe, but broadest compatibility)
+                os.environ['PATH'] = f"{path};" + os.environ.get('PATH', '')
+                added.append(str(path) + " (PATH)")
+        except Exception as e:  # pragma: no cover - defensive
+            log.debug("Failed to register DLL directory %s: %s", path, e)
+
+    if added and os.environ.get('META_HUMAN_DNA_DEV'):
+        log.debug("Registered Unreal/RigLogic DLL search paths: %s", added)
+
+_register_unreal_dll_directories()
 
 from . import operators, properties, utilities, manual_map, rig_logic
 from .ui import menus, importer, view_3d, addon_preferences, callbacks

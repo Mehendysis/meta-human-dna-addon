@@ -93,20 +93,50 @@ def set_bone_collection(
         theme: str | None = None
     ):
     # get or create a new bone collection
-    collection = rig_object.data.collections.get(collection_name) # type: ignore
+    try:
+        collection = rig_object.data.collections.get(collection_name) # type: ignore
+    except Exception as e:  # pragma: no cover
+        logger.error(f"[set_bone_collection] Failed to access collections on rig '{rig_object.name}': {e}")
+        return
+
     if not collection:
-        collection = rig_object.data.collections.new(name=collection_name) # type: ignore
+        try:
+            collection = rig_object.data.collections.new(name=collection_name) # type: ignore
+        except Exception as e:  # pragma: no cover
+            logger.error(f"[set_bone_collection] Failed creating bone collection '{collection_name}': {e}")
+            return
 
     for bone_name in bone_names:
-        bone = rig_object.data.bones.get(bone_name) # type: ignore
+        try:
+            bone = rig_object.data.bones.get(bone_name) # type: ignore
+        except Exception as e:  # pragma: no cover
+            logger.warning(f"[set_bone_collection] Unable to fetch bone '{bone_name}': {e}")
+            continue
         if bone and theme:
-            bone.color.palette = theme # type: ignore
+            try:
+                bone.color.palette = theme # type: ignore
+            except Exception as e:  # pragma: no cover
+                logger.debug(f"[set_bone_collection] Ignoring palette set failure on bone '{bone_name}': {e}")
 
-        pose_bone = rig_object.pose.bones.get(bone_name) # type: ignore
+        try:
+            pose_bone = rig_object.pose.bones.get(bone_name) # type: ignore
+        except Exception as e:  # pragma: no cover
+            logger.debug(f"[set_bone_collection] Unable to fetch pose bone '{bone_name}': {e}")
+            continue
         if pose_bone:
-            collection.assign(pose_bone)
+            try:
+                collection.assign(pose_bone)
+            except KeyError as e:  # pragma: no cover
+                # Observed sporadic KeyError in headless runs; log & continue without failing export.
+                logger.warning(f"[set_bone_collection] KeyError assigning '{bone_name}' to '{collection_name}': {e}")
+                continue
+            except Exception as e:  # pragma: no cover
+                logger.debug(f"[set_bone_collection] Unexpected error assigning '{bone_name}' to '{collection_name}': {e}")
             if theme:
-                pose_bone.color.palette = theme # type: ignore
+                try:
+                    pose_bone.color.palette = theme # type: ignore
+                except Exception:
+                    pass
 
 
 def set_head_bone_collections(

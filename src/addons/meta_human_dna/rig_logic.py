@@ -733,6 +733,11 @@ class RigLogicInstance(bpy.types.PropertyGroup):
         if raw_control_bone_names:
             return raw_control_bone_names
         
+        # Fallback: bindings may not yet expose control enumeration APIs. Gracefully degrade.
+        if not self.head_dna_reader or not hasattr(self.head_dna_reader, 'getRawControlCount') or not hasattr(self.head_dna_reader, 'getRawControlName'):
+            self.data['head_raw_control_bone_names'] = []
+            return self.data['head_raw_control_bone_names']
+
         raw_control_bone_names = set()
         for index in range(self.head_dna_reader.getRawControlCount()):
             full_name = self.head_dna_reader.getRawControlName(index)
@@ -777,6 +782,10 @@ class RigLogicInstance(bpy.types.PropertyGroup):
         if raw_control_bone_names:
             return raw_control_bone_names
         
+        if not self.body_dna_reader or not hasattr(self.body_dna_reader, 'getRawControlCount') or not hasattr(self.body_dna_reader, 'getRawControlName'):
+            self.data['body_raw_control_bone_names'] = []
+            return self.data['body_raw_control_bone_names']
+
         raw_control_bone_names = set()
         for index in range(self.body_dna_reader.getRawControlCount()):
             full_name = self.body_dna_reader.getRawControlName(index)
@@ -876,6 +885,13 @@ class RigLogicInstance(bpy.types.PropertyGroup):
         if not self.face_board or not self.head_dna_reader:
             return
         
+        # Fallback: if GUI control APIs not yet exposed in bindings, skip gracefully
+        if not (hasattr(self.head_dna_reader, 'getGUIControlCount') and hasattr(self.head_dna_reader, 'getGUIControlName')):
+            if not self.data.get('logged_missing_gui_api'):
+                logger.warning('RigLogic GUI control accessor API not available in current bindings; skipping GUI update.')
+                self.data['logged_missing_gui_api'] = True
+            return
+
         missing_gui_controls = []
         
         for index in range(self.head_dna_reader.getGUIControlCount()):
@@ -905,7 +921,15 @@ class RigLogicInstance(bpy.types.PropertyGroup):
             self.data['logged_missing_gui_controls'] = True
 
         # set the active LOD level for the head instance to optimize performance
-        self.head_instance.setLOD(level=int(self.active_lod[-1]))
+        # Some pybind builds expose only positional signature: setLOD(int)
+        try:
+            self.head_instance.setLOD(int(self.active_lod[-1]))  # type: ignore[arg-type]
+        except TypeError:  # pragma: no cover - defensive
+            # Fallback for alternate signature (legacy)
+            try:
+                self.head_instance.setLOD(level=int(self.active_lod[-1]))  # type: ignore
+            except Exception:
+                logger.warning('setLOD not supported on head_instance; skipping LOD optimization')
         # map the GUI changes to the raw controls
         self.head_manager.mapGUIToRawControls(self.head_instance)
         # calculate the controls
@@ -1083,7 +1107,13 @@ class RigLogicInstance(bpy.types.PropertyGroup):
             # reset all raw controls to 0.0
             for index in range(self.body_dna_reader.getRawControlCount()):
                 self.body_instance.setRawControl(index, 0.0)
-            self.body_instance.setLOD(level=int(self.active_lod[-1]))
+            try:
+                self.body_instance.setLOD(int(self.active_lod[-1]))  # type: ignore[arg-type]
+            except TypeError:  # pragma: no cover - defensive
+                try:
+                    self.body_instance.setLOD(level=int(self.active_lod[-1]))  # type: ignore
+                except Exception:
+                    logger.warning('setLOD not supported on body_instance; skipping LOD optimization')
             self.body_manager.calculate(self.body_instance)
         else:
             self.update_body_raw_control_values()
@@ -1141,7 +1171,13 @@ class RigLogicInstance(bpy.types.PropertyGroup):
             self.data['logged_missing_raw_controls'] = True
 
         # set the active LOD level for the body instance to optimize performance
-        self.body_instance.setLOD(level=int(self.active_lod[-1]))
+        try:
+            self.body_instance.setLOD(int(self.active_lod[-1]))  # type: ignore[arg-type]
+        except TypeError:  # pragma: no cover
+            try:
+                self.body_instance.setLOD(level=int(self.active_lod[-1]))  # type: ignore
+            except Exception:
+                logger.warning('setLOD not supported on body_instance; skipping LOD optimization')
 
         # calculate the changes
         # self.body_manager.calculateControls(self.body_instance)
